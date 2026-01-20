@@ -5,7 +5,6 @@ import re
 import io
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from difflib import get_close_matches
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="VW RTO Verifier", layout="wide")
@@ -18,6 +17,10 @@ def normalize_text(text):
     return text.lower().strip()
 
 def check_name_match(excel_name, doc_name):
+    # Safe check: if excel_name is a Series (duplicate col), take the first one
+    if isinstance(excel_name, pd.Series):
+        excel_name = str(excel_name.iloc[0])
+    
     if not doc_name or not excel_name:
         return False
     
@@ -41,18 +44,18 @@ def check_name_match(excel_name, doc_name):
         return True
     return False
 
-def find_best_match_column(columns, keywords):
+def find_column_case_insensitive(columns, allowed_names):
     """
-    Fuzzy search for column names.
-    Returns the actual column name if found, else None.
+    Strict case-insensitive search.
+    Returns the actual column name from the dataframe if found.
     """
-    columns_lower = [str(c).lower().strip() for c in columns]
+    # Normalize allowable names to lower case
+    allowed_lower = [name.lower().strip() for name in allowed_names]
     
-    for keyword in keywords:
-        # Exact substring match first
-        for idx, col in enumerate(columns_lower):
-            if keyword in col:
-                return columns[idx]
+    # Check each column in the dataframe
+    for col in columns:
+        if str(col).lower().strip() in allowed_lower:
+            return col
     
     return None
 
@@ -91,17 +94,15 @@ def parse_document_data(text):
             data['vehicle_no'] = "Not Found"
         found_perm_number = False
 
-    # --- 3. DETERMINE REGISTRATION TYPE (Updated Logic) ---
-    # Rule: If Perm number found OR "NEW" found -> Permanent.
-    
+    # --- 3. DETERMINE REGISTRATION TYPE ---
     if found_perm_number:
         data['reg_type'] = "Permanent"
     elif data['vehicle_no'] == "NEW":
-        data['reg_type'] = "Permanent" # "NEW" is strictly Permanent now
+        data['reg_type'] = "Permanent"
     elif has_temp_keyword:
         data['reg_type'] = "Temporary"
     else:
-        data['reg_type'] = "Temporary" # Fallback
+        data['reg_type'] = "Temporary"
 
     # --- 4. FIND CHASSIS NO ---
     chassis_match = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', text)
@@ -135,51 +136,46 @@ def parse_document_data(text):
     return data
 
 def analyze_row(row, doc_data, df_docs_all):
-    """
-    Analyzes the row.
-    df_docs_all is passed to allow searching by Name if Chassis fails.
-    """
-    
-    # 0. CHECK IF PROCESSING FAILED (Empty data)
-    # If merged data is empty, we attempt a secondary lookup by name
+    # Safe extractor for Row Series (handles duplicates)
+    def get_val(col_name):
+        val = row.get(col_name)
+        if isinstance(val, pd.Series):
+            return val.iloc[0]
+        return val
+
+    excel_name = get_val('Customer Name')
+    excel_chassis = get_val('Chassis number')
+
+    # 0. CHECK IF PROCESSING FAILED
     if not doc_data.get('doc_chassis'):
-        
-        # --- SECONDARY LOOKUP: MATCH NAME, MISMATCH CHASSIS ---
-        excel_name = row.get('Customer Name')
+        # Secondary Lookup: Name Match / Chassis Mismatch
         if excel_name and not df_docs_all.empty:
             for _, doc_row in df_docs_all.iterrows():
                 if check_name_match(excel_name, doc_row['doc_name']):
-                    # Found a name match, but chassis didn't match (otherwise merge would have caught it)
                     return ("Inconclusive Documentation provided - RTO challan/VAHAN screenshot/Tax paid receipt attached is incorrect", 
                             "Hold", "NAME MATCH / CHASSIS MISMATCH")
         
-        # If no name match found either:
         return "Please verify manually", "Pending", "NO DOCUMENT FOUND"
 
-    # --- PRIMARY CHECK (Chassis Matched via Merge) ---
-    chassis_match = True # Because we merged on chassis or doc_chassis exists
-    name_is_match = check_name_match(row['Customer Name'], doc_data.get('doc_name'))
+    # --- PRIMARY CHECK ---
+    chassis_match = True 
+    name_is_match = check_name_match(excel_name, doc_data.get('doc_name'))
     is_permanent = doc_data['reg_type'] == "Permanent"
 
-    # 1. APPROVED CASE
-    # Match: Chassis, Name, Permanent (or NEW)
+    # 1. APPROVED
     if chassis_match and name_is_match and is_permanent:
         return "Approved", "Approve", "None"
 
-    # 2. TEMP REG CASE
-    # Match: Chassis, Name, Temporary Reg
+    # 2. TEMP REG
     if chassis_match and name_is_match and not is_permanent:
         return ("Incomplete Documentation provided - RTO challan/VAHAN screenshot/Tax paid receipt is not attached.", 
                 "Hold", "TEMP REGISTRATION")
 
-    # 3. NAME MISMATCH CASE
-    # Match: Chassis, Mismatch: Name
+    # 3. NAME MISMATCH
     if chassis_match and not name_is_match:
-        # Remarks for Chassis Match / Name Mismatch
         return ("Inconclusive Documentation provided - RTO challan/VAHAN screenshot/Tax paid receipt attached is incorrect", 
                 "Hold", "NAME MISMATCH")
 
-    # Fallback
     return "Please verify manually", "Pending", "UNKNOWN ERROR"
 
 def create_colored_excel(df):
@@ -191,10 +187,9 @@ def create_colored_excel(df):
     wb = load_workbook(output)
     ws = wb.active
 
-    # DEFINING COLORS
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid") # Approve
-    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid") # Hold
-    blue_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # Pending
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    blue_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 
     header = {cell.value: i+1 for i, cell in enumerate(ws[1])}
     status_col_idx = header.get('RTO status')
@@ -257,24 +252,38 @@ if st.button("🚀 Run Verification"):
                 st.error("❌ Error reading Excel file.")
                 st.stop()
             
-            # --- FUZZY COLUMN MATCHING ---
-            chassis_col = find_best_match_column(df_user.columns, ['chassis', 'vin'])
-            name_col = find_best_match_column(df_user.columns, ['name', 'customer', 'cust'])
+            # --- STRICT CASE-INSENSITIVE COLUMN MATCHING ---
+            
+            # Allowed variations for Chassis
+            chassis_variations = ['chassis number', 'vin number']
+            chassis_col = find_column_case_insensitive(df_user.columns, chassis_variations)
+            
+            # Allowed variations for Name
+            name_variations = ['customer name']
+            name_col = find_column_case_insensitive(df_user.columns, name_variations)
 
             if not chassis_col or not name_col:
-                st.error(f"❌ Could not automatically identify 'Chassis' or 'Customer Name' columns. Found: {list(df_user.columns)}")
+                st.error(f"❌ Column Error. \n\nExpected 'Chassis Number' or 'VIN Number' AND 'Customer Name' (Case Insensitive). \n\nFound columns: {list(df_user.columns)}")
                 st.stop()
             
-            # Rename important columns to standard names for processing
-            df_user.rename(columns={chassis_col: 'Chassis number', name_col: 'Customer Name'}, inplace=True)
+            # --- CLEAN COLUMNS BEFORE MERGE ---
+            # 1. Rename to Standard
+            rename_map = {chassis_col: 'Chassis number', name_col: 'Customer Name'}
             
+            # 2. Drop existing columns with target names if they aren't the source
+            for target in ['Chassis number', 'Customer Name']:
+                if target in df_user.columns and target not in [chassis_col, name_col]:
+                    df_user = df_user.drop(columns=[target])
+            
+            df_user.rename(columns=rename_map, inplace=True)
+            
+            # 3. Final safety: remove duplicate columns
+            df_user = df_user.loc[:, ~df_user.columns.duplicated()]
+
             # --- C. MERGE ---
-            # We keep the user structure (left join)
             if not df_docs.empty:
-                # Ensure data types match for merge
                 df_user['Chassis number'] = df_user['Chassis number'].astype(str).str.strip()
                 df_docs['doc_chassis'] = df_docs['doc_chassis'].astype(str).str.strip()
-                
                 merged_df = pd.merge(df_user, df_docs, left_on='Chassis number', right_on='doc_chassis', how='left')
             else:
                 merged_df = df_user.copy()
@@ -303,18 +312,21 @@ if st.button("🚀 Run Verification"):
                 else:
                     final_reg_date = fallback_date
 
-                # Pass df_docs (full) to allow secondary name search
                 remark, status, error_type = analyze_row(row, doc_data, df_docs)
                 
-                # Keep original columns, add verification columns
+                # Create Output Row
                 output_row = row.to_dict()
                 
-                # Clean up merge artifacts if they exist
+                # Handle possible Series
+                for k, v in output_row.items():
+                    if isinstance(v, pd.Series):
+                        output_row[k] = v.iloc[0]
+
+                # Clean up artifacts
                 for key in ['doc_name', 'doc_chassis', 'reg_type', 'vehicle_no', 
                            'reg_date_specific', 'receipt_date_specific', 'fallback_date']:
                     if key in output_row: del output_row[key]
 
-                # Add Standardized Output
                 output_row['Verification Date'] = final_reg_date
                 output_row['Doc Vehicle Num'] = doc_data['vehicle_no']
                 output_row['RTO status'] = status
@@ -324,7 +336,7 @@ if st.button("🚀 Run Verification"):
 
             final_df = pd.DataFrame(results)
 
-            # Reorder: Ensure key columns are at the front, but keep original excel structure mostly
+            # Reorder
             cols = list(final_df.columns)
             priority = ['Chassis number', 'Customer Name', 'RTO status', 'Remarks']
             new_order = priority + [c for c in cols if c not in priority]
