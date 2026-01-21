@@ -49,10 +49,8 @@ def find_column_case_insensitive(columns, allowed_names):
     Strict case-insensitive search.
     Returns the actual column name from the dataframe if found.
     """
-    # Normalize allowable names to lower case
     allowed_lower = [name.lower().strip() for name in allowed_names]
     
-    # Check each column in the dataframe
     for col in columns:
         if str(col).lower().strip() in allowed_lower:
             return col
@@ -78,7 +76,6 @@ def parse_document_data(text):
     has_temp_keyword = bool(re.search(temp_keyword_pattern, text, re.IGNORECASE))
 
     # --- 2. FIND VEHICLE NUMBER ---
-    # Standard: MH01AB1234 | BH Series: 22BH1234AA
     perm_pattern = r'\b[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}\b'
     bh_pattern = r'\b[0-9]{2}BH[0-9]{4}[A-Z]{1,2}\b'
     
@@ -253,12 +250,9 @@ if st.button("🚀 Run Verification"):
                 st.stop()
             
             # --- STRICT CASE-INSENSITIVE COLUMN MATCHING ---
-            
-            # Allowed variations for Chassis
             chassis_variations = ['chassis number', 'vin number']
             chassis_col = find_column_case_insensitive(df_user.columns, chassis_variations)
             
-            # Allowed variations for Name
             name_variations = ['customer name']
             name_col = find_column_case_insensitive(df_user.columns, name_variations)
 
@@ -266,18 +260,14 @@ if st.button("🚀 Run Verification"):
                 st.error(f"❌ Column Error. \n\nExpected 'Chassis Number' or 'VIN Number' AND 'Customer Name' (Case Insensitive). \n\nFound columns: {list(df_user.columns)}")
                 st.stop()
             
-            # --- CLEAN COLUMNS BEFORE MERGE ---
-            # 1. Rename to Standard
+            # --- CLEAN COLUMNS ---
             rename_map = {chassis_col: 'Chassis number', name_col: 'Customer Name'}
             
-            # 2. Drop existing columns with target names if they aren't the source
             for target in ['Chassis number', 'Customer Name']:
                 if target in df_user.columns and target not in [chassis_col, name_col]:
                     df_user = df_user.drop(columns=[target])
             
             df_user.rename(columns=rename_map, inplace=True)
-            
-            # 3. Final safety: remove duplicate columns
             df_user = df_user.loc[:, ~df_user.columns.duplicated()]
 
             # --- C. MERGE ---
@@ -314,15 +304,12 @@ if st.button("🚀 Run Verification"):
 
                 remark, status, error_type = analyze_row(row, doc_data, df_docs)
                 
-                # Create Output Row
                 output_row = row.to_dict()
                 
-                # Handle possible Series
                 for k, v in output_row.items():
                     if isinstance(v, pd.Series):
                         output_row[k] = v.iloc[0]
 
-                # Clean up artifacts
                 for key in ['doc_name', 'doc_chassis', 'reg_type', 'vehicle_no', 
                            'reg_date_specific', 'receipt_date_specific', 'fallback_date']:
                     if key in output_row: del output_row[key]
@@ -330,15 +317,16 @@ if st.button("🚀 Run Verification"):
                 output_row['Verification Date'] = final_reg_date
                 output_row['Doc Vehicle Num'] = doc_data['vehicle_no']
                 output_row['RTO status'] = status
+                output_row['Specific Error'] = error_type
                 output_row['Remarks'] = remark
                 
                 results.append(output_row)
 
             final_df = pd.DataFrame(results)
 
-            # Reorder
+            # Reorder with Specific Error column included
             cols = list(final_df.columns)
-            priority = ['Chassis number', 'Customer Name', 'RTO status', 'Remarks']
+            priority = ['Chassis number', 'Customer Name', 'RTO status', 'Specific Error', 'Remarks']
             new_order = priority + [c for c in cols if c not in priority]
             final_df = final_df[new_order]
 
